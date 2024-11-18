@@ -4,9 +4,9 @@
 #include <HardwareSerial.h>
 
 // WiFi credentials and Firebase URL
-const char* ssid = "yemete kudasai";
-const char* password = "12345667";
-const char* firebaseURL = "https://craft-f3af3-default-rtdb.asia-southeast1.firebasedatabase.app/";
+const char* ssid = "";
+const char* password = "";
+const char* firebaseURL = "";
 
 // Pin definitions
 const int solenoidPin = 5;
