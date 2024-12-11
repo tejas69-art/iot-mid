@@ -29,6 +29,7 @@ HardwareSerial SerialGPS(1);
 String lastTimestamp = "";
 unsigned long lastVibrationCheck = 0;
 unsigned long lastHeartbeatSent = 0;
+unsigned long lastOpenStatusCheck = 0;
 bool isVibrationDetected = false;
 String lockStatus = "Locked";  // Initialize lock status
 unsigned long heartbeatCounter = 0;
@@ -61,6 +62,15 @@ void loop() {
   if (millis() - lastHeartbeatSent >= 60000) {  // Heartbeat interval
     lastHeartbeatSent = millis();
     sendHeartbeat();
+    if (gps.location.isValid()) {
+            publishLocationToFirebase();
+          }
+  }
+
+  // Check open status every 5 seconds
+  if (millis() - lastOpenStatusCheck >= 5000) {
+    lastOpenStatusCheck = millis();
+    checkOpenStatus();
   }
 
   checkPaymentData();
@@ -76,6 +86,48 @@ void loop() {
 
   delay(100);
 }
+
+void checkOpenStatus() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(String(firebaseURL) + "/devices/" + deviceID + "/open.json");
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode > 0) {
+      String payload = http.getString();
+      int valueStart = payload.indexOf("\"value\":") + 8;
+      int valueEnd = payload.indexOf("}", valueStart);
+
+      if (valueStart > 7 && valueEnd > valueStart) {
+        String openValueStr = payload.substring(valueStart, valueEnd);
+        int openValue = openValueStr.toInt();
+
+        if (openValue == 1) {
+          // Activate solenoid
+          digitalWrite(solenoidPin, HIGH);
+          lockStatus = "Open";
+
+          
+        } else {
+          // Deactivate solenoid
+          digitalWrite(solenoidPin, LOW);
+          lockStatus = "Locked";
+        }
+      } else {
+        // Handle case where "open" value is deleted or missing
+        digitalWrite(solenoidPin, LOW);
+        lockStatus = "Locked";
+        Serial.println("Open value missing, locking solenoid.");
+      }
+    } else {
+      // Error handling for HTTP request failure
+      Serial.print("Error in HTTP GET for open status: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  }
+}
+
 
 void sendHeartbeat() {
   float batteryPercentage = getBatteryPercentage();
@@ -131,17 +183,20 @@ float getBatteryPercentage() {
 }
 
 void checkVibrationAndUpdate() {
-  int vibrationState = digitalRead(vibrationPin);
+  // Only check vibration if the device is not in open status
+  if (lockStatus != "Open") {
+    int vibrationState = digitalRead(vibrationPin);
 
-  if (vibrationState == HIGH && !isVibrationDetected) {
-    isVibrationDetected = true;
-    Serial.println("Vibration detected!");
-    sendVibrationAlert();
-    if (gps.location.isValid()) {
-      publishLocationToFirebase();
+    if (vibrationState == HIGH && !isVibrationDetected) {
+      isVibrationDetected = true;
+      Serial.println("Vibration detected!");
+      sendVibrationAlert();
+      if (gps.location.isValid()) {
+        publishLocationToFirebase();
+      }
+    } else {
+      isVibrationDetected = false;
     }
-  } else {
-    isVibrationDetected = false;
   }
 }
 
@@ -176,27 +231,36 @@ void checkPaymentData() {
       String payload = http.getString();
       int timestampStart = payload.indexOf("\"timestamp\":") + 12;
       int timestampEnd = payload.indexOf(",", timestampStart);
-      String timestamp = payload.substring(timestampStart, timestampEnd);
+      String timestamp = payload.substring(timestampStart, timestampEnd).trim(); // Ensure no spaces
 
       int valueStart = payload.indexOf("\"value\":") + 8;
       int valueEnd = payload.indexOf("}", valueStart);
       String amount = payload.substring(valueStart, valueEnd);
 
-      if (timestamp != lastTimestamp) {
+      if (!timestamp.isEmpty() && timestamp != lastTimestamp) {
+        // Update lastTimestamp immediately
+        lastTimestamp = timestamp;
+
         Serial.print("Payment Amount Received: Rs. ");
         Serial.println(amount);
 
         lockStatus = "Unlocked";  // Update lock status
         digitalWrite(solenoidPin, HIGH);
+
+        // Keep solenoid active for 20 seconds
         delay(20000);
+
         digitalWrite(solenoidPin, LOW);
         lockStatus = "Payment received and locked";  // Reset lock status
-        lastTimestamp = timestamp;
       }
+    } else {
+      Serial.print("Error in HTTP GET for payment data: ");
+      Serial.println(httpResponseCode);
     }
     http.end();
   }
 }
+
 
 void publishLocationToFirebase() {
   if (WiFi.status() == WL_CONNECTED && gps.location.isValid()) {
